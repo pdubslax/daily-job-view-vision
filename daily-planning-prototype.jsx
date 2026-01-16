@@ -1707,7 +1707,13 @@ export default function DailyPlanningPrototype() {
                       )}
                     </div>
                   </td>
-                  <td style={styles.tdAssignments}>
+                  <td 
+                    style={styles.tdAssignments}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleOpenAssignModal(job.id, e);
+                    }}
+                  >
                     <div style={styles.assignmentsList}>
                       {job.assignments.map((assignment, idx) => {
                         const statusStyle = statusColors[assignment.status] || statusColors.pending;
@@ -3616,6 +3622,7 @@ const styles = {
   tdAssignments: {
     padding: '10px 12px',
     verticalAlign: 'top',
+    cursor: 'pointer',
   },
   assignmentsList: {
     display: 'flex',
