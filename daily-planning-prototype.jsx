@@ -1736,7 +1736,10 @@ export default function DailyPlanningPrototype() {
                       })}
                       <button 
                         style={styles.addAssignmentButton}
-                        onClick={(e) => handleOpenAssignModal(job.id, e)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOpenAssignModal(job.id, e);
+                        }}
                       >
                         +
                       </button>
@@ -2566,10 +2569,7 @@ export default function DailyPlanningPrototype() {
                             return (
                               <label 
                                 key={driver.id} 
-                                style={{
-                                  ...styles.driverRow,
-                                  ...(hasNote ? styles.driverRowWithNote : {}),
-                                }}
+                                style={styles.driverRow}
                               >
                                 <input
                                   type="checkbox"
