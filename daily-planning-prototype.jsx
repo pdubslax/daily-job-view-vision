@@ -579,6 +579,13 @@ export default function DailyPlanningPrototype() {
   const [messageText, setMessageText] = useState('');
   const [messageMode, setMessageMode] = useState('group'); // 'group' or 'individual'
 
+  // Dispatch modal state
+  const [showDispatchModal, setShowDispatchModal] = useState(false);
+  const [dispatchingJob, setDispatchingJob] = useState(null);
+  const [dispatchingJobs, setDispatchingJobs] = useState([]); // for bulk dispatch
+  const [dispatchMethod, setDispatchMethod] = useState('sms'); // 'sms', 'email', 'app', 'all'
+  const [dispatchMessage, setDispatchMessage] = useState('');
+
   const handleJobClick = (job) => {
     setSelectedJob(job);
     setEditForm({
@@ -1033,6 +1040,55 @@ export default function DailyPlanningPrototype() {
     
     alert(`Sending ${modeDesc} to ${driverNames}:\n\n"${messageText}"`);
     handleCloseMessageModal();
+  };
+
+  // Dispatch modal functions
+  const handleOpenDispatchModal = (job, e) => {
+    e.stopPropagation();
+    setDispatchingJob(job);
+    setDispatchingJobs([]);
+    setShowDispatchModal(true);
+    setDispatchMethod('sms');
+    setDispatchMessage(generateDefaultDispatchMessage([job]));
+  };
+
+  const handleOpenBulkDispatchModal = () => {
+    const selected = getSelectedJobs();
+    if (selected.length === 0) return;
+    setDispatchingJob(null);
+    setDispatchingJobs(selected);
+    setShowDispatchModal(true);
+    setDispatchMethod('sms');
+    setDispatchMessage(generateDefaultDispatchMessage(selected));
+  };
+
+  const handleCloseDispatchModal = () => {
+    setShowDispatchModal(false);
+    setDispatchingJob(null);
+    setDispatchingJobs([]);
+    setDispatchMethod('sms');
+    setDispatchMessage('');
+  };
+
+  const generateDefaultDispatchMessage = (jobs) => {
+    if (jobs.length === 1) {
+      const job = jobs[0];
+      const assignmentCount = job.assignments.length;
+      const driverNames = job.assignments.map(a => a.driver).join(', ');
+      return `You've been assigned to ${job.jobName} (${job.customer}). ${job.pickup?.name ? `Pickup: ${job.pickup.name}` : ''} ${job.dropoff?.name ? `→ Dropoff: ${job.dropoff.name}` : ''}. Please confirm your availability.`;
+    }
+    return `You've been assigned to ${jobs.length} jobs for ${formatDate(currentDate)}. Please check your assignments and confirm availability.`;
+  };
+
+  const handleDispatch = () => {
+    const jobs = dispatchingJobs.length > 0 ? dispatchingJobs : [dispatchingJob];
+    const totalDrivers = new Set(jobs.flatMap(j => j.assignments.map(a => a.driverId))).size;
+    const methodLabel = dispatchMethod === 'all' ? 'SMS and Email' : 
+                        dispatchMethod === 'sms' ? 'SMS' : 'Email';
+    
+    alert(`Dispatching ${jobs.length} job(s) to ${totalDrivers} driver(s) via ${methodLabel}.\n\nMessage:\n"${dispatchMessage}"`);
+    handleCloseDispatchModal();
+    clearJobSelection();
   };
 
   // Format target for display
@@ -1527,6 +1583,9 @@ export default function DailyPlanningPrototype() {
             </button>
           </div>
           <div style={styles.bulkActionRight}>
+            <button className="bulkDispatchButton" style={styles.bulkDispatchButton} onClick={handleOpenBulkDispatchModal}>
+              🚀 Dispatch
+            </button>
             <button 
               style={styles.bulkBillingButton} 
               onClick={() => alert(`Preparing ${selectedJobIds.length} job(s) for billing audit...`)}
@@ -1747,6 +1806,15 @@ export default function DailyPlanningPrototype() {
                   </td>
                   <td style={styles.tdActions}>
                     <div className="actionButtons" style={styles.actionButtons}>
+                      <button
+                        className="actionButton"
+                        style={{...styles.actionButton, ...styles.actionButtonDispatch}}
+                        onClick={(e) => handleOpenDispatchModal(job, e)}
+                        title="Dispatch job"
+                        disabled={job.assignments.length === 0}
+                      >
+                        🚀
+                      </button>
                       <button
                         className="actionButton"
                         style={{...styles.actionButton, ...styles.actionButtonCopy}}
@@ -3039,6 +3107,136 @@ export default function DailyPlanningPrototype() {
           </div>
         </>
       )}
+
+      {/* Dispatch Modal */}
+      {showDispatchModal && (dispatchingJob || dispatchingJobs.length > 0) && (
+        <>
+          <div style={styles.overlay} onClick={handleCloseDispatchModal} />
+          <div style={styles.dispatchModal}>
+            <div style={styles.modalHeader}>
+              <h2 style={styles.modalTitle}>
+                {dispatchingJobs.length > 0 
+                  ? `Dispatch ${dispatchingJobs.length} Jobs`
+                  : 'Dispatch Job'}
+              </h2>
+              <button style={styles.closeButton} onClick={handleCloseDispatchModal}>×</button>
+            </div>
+
+            <div style={styles.dispatchModalContent}>
+              {/* Job(s) being dispatched preview */}
+              {dispatchingJob && (
+                <div style={styles.dispatchJobPreview}>
+                  <div style={styles.dispatchJobHeader}>
+                    <span style={styles.dispatchJobCustomer}>{dispatchingJob.customer}</span>
+                    <span style={{...styles.commodityBadgeSmall, backgroundColor: dispatchingJob.commodityColor}}>
+                      {dispatchingJob.commodity}
+                    </span>
+                  </div>
+                  <div style={styles.dispatchJobName}>{dispatchingJob.jobName}</div>
+                  <div style={styles.dispatchDriverList}>
+                    {dispatchingJob.assignments.map((a, i) => (
+                      <span key={i} style={styles.dispatchDriverBadge}>
+                        {a.driver}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {dispatchingJobs.length > 0 && (
+                <div style={styles.dispatchJobsPreview}>
+                  {dispatchingJobs.slice(0, 4).map((job, i) => (
+                    <div key={i} style={styles.dispatchJobPreviewItem}>
+                      <span style={{...styles.commodityDotSmall, backgroundColor: job.commodityColor}} />
+                      <span style={styles.dispatchJobPreviewName}>{job.jobName}</span>
+                      <span style={styles.dispatchJobDriverCount}>
+                        {job.assignments.length} driver{job.assignments.length !== 1 ? 's' : ''}
+                      </span>
+                    </div>
+                  ))}
+                  {dispatchingJobs.length > 4 && (
+                    <span style={styles.dispatchJobsMore}>+{dispatchingJobs.length - 4} more jobs</span>
+                  )}
+                  <div style={styles.dispatchTotalDrivers}>
+                    Total: {new Set(dispatchingJobs.flatMap(j => j.assignments.map(a => a.driverId))).size} unique driver(s)
+                  </div>
+                </div>
+              )}
+
+              {/* Dispatch method selection */}
+              <div style={styles.dispatchSection}>
+                <label style={styles.dispatchSectionLabel}>Send via</label>
+                <div style={styles.dispatchMethodOptions}>
+                  <label className="dispatchMethodOption" style={styles.dispatchMethodOption}>
+                    <input
+                      type="radio"
+                      name="dispatchMethod"
+                      value="sms"
+                      checked={dispatchMethod === 'sms'}
+                      onChange={() => setDispatchMethod('sms')}
+                      style={styles.dispatchRadio}
+                    />
+                    <div style={styles.dispatchMethodContent}>
+                      <span style={styles.dispatchMethodIcon}>📱</span>
+                      <span style={styles.dispatchMethodTitle}>SMS</span>
+                    </div>
+                  </label>
+                  <label className="dispatchMethodOption" style={styles.dispatchMethodOption}>
+                    <input
+                      type="radio"
+                      name="dispatchMethod"
+                      value="email"
+                      checked={dispatchMethod === 'email'}
+                      onChange={() => setDispatchMethod('email')}
+                      style={styles.dispatchRadio}
+                    />
+                    <div style={styles.dispatchMethodContent}>
+                      <span style={styles.dispatchMethodIcon}>✉️</span>
+                      <span style={styles.dispatchMethodTitle}>Email</span>
+                    </div>
+                  </label>
+                  <label className="dispatchMethodOption" style={styles.dispatchMethodOption}>
+                    <input
+                      type="radio"
+                      name="dispatchMethod"
+                      value="all"
+                      checked={dispatchMethod === 'all'}
+                      onChange={() => setDispatchMethod('all')}
+                      style={styles.dispatchRadio}
+                    />
+                    <div style={styles.dispatchMethodContent}>
+                      <span style={styles.dispatchMethodIcon}>📣</span>
+                      <span style={styles.dispatchMethodTitle}>All</span>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              {/* Dispatch message */}
+              <div style={styles.dispatchSection}>
+                <label style={styles.dispatchSectionLabel}>Message</label>
+                <textarea
+                  style={styles.dispatchMessageTextarea}
+                  value={dispatchMessage}
+                  onChange={(e) => setDispatchMessage(e.target.value)}
+                  placeholder="Enter dispatch message..."
+                  rows={4}
+                />
+              </div>
+            </div>
+
+            <div style={styles.modalFooter}>
+              <button style={styles.cancelButton} onClick={handleCloseDispatchModal}>Cancel</button>
+              <button 
+                className="dispatchButton"
+                style={styles.dispatchButton}
+                onClick={handleDispatch}
+              >
+                🚀 Dispatch Now
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -3707,6 +3905,10 @@ const styles = {
   actionButtonDanger: {
     borderColor: '#FED7D7',
     backgroundColor: '#FFF5F5',
+  },
+  actionButtonDispatch: {
+    borderColor: '#FBD38D',
+    backgroundColor: '#FFFAF0',
   },
   // Edit Panel Styles
   overlay: {
@@ -5178,6 +5380,172 @@ const styles = {
     backgroundColor: '#CBD5E0',
     cursor: 'not-allowed',
   },
+  // Dispatch Modal Styles
+  dispatchModal: {
+    position: 'fixed',
+    top: '50%',
+    left: '50%',
+    transform: 'translate(-50%, -50%)',
+    width: '480px',
+    maxHeight: '85vh',
+    backgroundColor: '#FFF',
+    borderRadius: '16px',
+    boxShadow: '0 25px 50px rgba(0, 0, 0, 0.25)',
+    zIndex: 101,
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+  },
+  dispatchModalContent: {
+    padding: '20px 24px',
+    overflowY: 'auto',
+    flex: 1,
+  },
+  dispatchJobPreview: {
+    padding: '16px',
+    backgroundColor: '#FFFAF0',
+    borderRadius: '12px',
+    border: '1px solid #FBD38D',
+    marginBottom: '20px',
+  },
+  dispatchJobHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: '6px',
+  },
+  dispatchJobCustomer: {
+    fontSize: '12px',
+    color: '#718096',
+    fontWeight: '500',
+  },
+  dispatchJobName: {
+    fontSize: '16px',
+    fontWeight: '600',
+    color: '#1A202C',
+    marginBottom: '10px',
+  },
+  dispatchDriverList: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '6px',
+  },
+  dispatchDriverBadge: {
+    padding: '4px 10px',
+    backgroundColor: '#FFF',
+    border: '1px solid #E2E8F0',
+    borderRadius: '12px',
+    fontSize: '12px',
+    fontWeight: '500',
+    color: '#4A5568',
+  },
+  dispatchJobsPreview: {
+    padding: '16px',
+    backgroundColor: '#FFFAF0',
+    borderRadius: '12px',
+    border: '1px solid #FBD38D',
+    marginBottom: '20px',
+  },
+  dispatchJobPreviewItem: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '8px 0',
+    borderBottom: '1px solid #FED7AA',
+  },
+  dispatchJobPreviewName: {
+    flex: 1,
+    fontSize: '14px',
+    fontWeight: '500',
+    color: '#1A202C',
+  },
+  dispatchJobDriverCount: {
+    fontSize: '12px',
+    color: '#718096',
+  },
+  dispatchJobsMore: {
+    fontSize: '13px',
+    color: '#718096',
+    fontStyle: 'italic',
+    padding: '8px 0',
+  },
+  dispatchTotalDrivers: {
+    marginTop: '12px',
+    paddingTop: '12px',
+    borderTop: '1px solid #FED7AA',
+    fontSize: '14px',
+    fontWeight: '600',
+    color: '#C05621',
+  },
+  dispatchSection: {
+    marginBottom: '20px',
+  },
+  dispatchSectionLabel: {
+    display: 'block',
+    fontSize: '13px',
+    fontWeight: '600',
+    color: '#4A5568',
+    marginBottom: '10px',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px',
+  },
+  dispatchMethodOptions: {
+    display: 'flex',
+    gap: '10px',
+  },
+  dispatchMethodOption: {
+    flex: 1,
+    display: 'flex',
+    alignItems: 'center',
+    padding: '12px',
+    border: '2px solid #E2E8F0',
+    borderRadius: '10px',
+    cursor: 'pointer',
+    transition: 'all 0.15s ease',
+    backgroundColor: '#FFF',
+  },
+  dispatchRadio: {
+    display: 'none',
+  },
+  dispatchMethodContent: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '4px',
+    width: '100%',
+  },
+  dispatchMethodIcon: {
+    fontSize: '20px',
+  },
+  dispatchMethodTitle: {
+    fontSize: '12px',
+    fontWeight: '600',
+    color: '#4A5568',
+  },
+  dispatchMessageTextarea: {
+    width: '100%',
+    padding: '12px',
+    border: '2px solid #E2E8F0',
+    borderRadius: '10px',
+    fontSize: '14px',
+    fontFamily: 'inherit',
+    resize: 'vertical',
+    minHeight: '100px',
+    boxSizing: 'border-box',
+  },
+  dispatchButton: {
+    padding: '12px 24px',
+    border: 'none',
+    borderRadius: '10px',
+    backgroundColor: '#ED8936',
+    fontSize: '14px',
+    fontWeight: '600',
+    color: '#FFF',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+  },
   // Bulk Action Bar Styles
   bulkActionBar: {
     display: 'flex',
@@ -5243,6 +5611,19 @@ const styles = {
     border: 'none',
     borderRadius: '8px',
     backgroundColor: '#3182CE',
+    color: '#FFF',
+    fontSize: '14px',
+    fontWeight: '500',
+    cursor: 'pointer',
+  },
+  bulkDispatchButton: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '8px 16px',
+    border: 'none',
+    borderRadius: '8px',
+    backgroundColor: '#ED8936',
     color: '#FFF',
     fontSize: '14px',
     fontWeight: '500',
@@ -5453,6 +5834,25 @@ styleSheet.textContent = `
   .removeTargetButton:hover {
     background-color: #FED7D7 !important;
     color: #C53030 !important;
+  }
+  
+  .dispatchMethodOption:hover {
+    border-color: #ED8936;
+    background-color: #FFFAF0;
+  }
+  
+  .dispatchMethodOption:has(input:checked) {
+    border-color: #ED8936;
+    background-color: #FFFAF0;
+    box-shadow: 0 0 0 3px rgba(237, 137, 54, 0.15);
+  }
+  
+  .bulkDispatchButton:hover {
+    background-color: #DD6B20;
+  }
+  
+  .dispatchButton:hover {
+    background-color: #DD6B20;
   }
 `;
 document.head.appendChild(styleSheet);
