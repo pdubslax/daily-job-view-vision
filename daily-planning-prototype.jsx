@@ -505,6 +505,9 @@ export default function DailyPlanningPrototype() {
   const [selectedJobIds, setSelectedJobIds] = useState([]); // for bulk operations
   const [searchQuery, setSearchQuery] = useState('');
   const [sortOrder, setSortOrder] = useState('customer-asc');
+  
+  // Version toggle: 'northStar' (full features) or 'nextHoppers' (Next Up Hopper Milestone - stripped down)
+  const [versionMode, setVersionMode] = useState('northStar');
 
   // View config settings
   const [showConfigPanel, setShowConfigPanel] = useState(false);
@@ -515,6 +518,11 @@ export default function DailyPlanningPrototype() {
     showCharges: false,
     showTags: false,
     showCommodity: true,
+    showTruckTarget: true,
+    showLoadTarget: true,
+    showCommodityTotals: true,
+    showAssignmentCount: true,
+    showLoadCount: true,
   });
   
   // Get jobs for current date
@@ -557,8 +565,10 @@ export default function DailyPlanningPrototype() {
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [assigningJobId, setAssigningJobId] = useState(null);
   const [driverSearch, setDriverSearch] = useState('');
-  const [selectedDrivers, setSelectedDrivers] = useState([]); // [{driverId, name, truckId, loads, recurring}]
+  const [selectedDrivers, setSelectedDrivers] = useState([]); // [{driverId, name, truckId, loads, recurring, loadsFromUnassigned}]
   const [expandedFleets, setExpandedFleets] = useState(Object.keys(driverPool));
+  const [modalUnassignedLoads, setModalUnassignedLoads] = useState(0);
+  const [addUnassignedInput, setAddUnassignedInput] = useState('');
 
   // Copy forward modal state
   const [showCopyModal, setShowCopyModal] = useState(false);
@@ -833,6 +843,27 @@ export default function DailyPlanningPrototype() {
     const loads = delivered.reduce((sum, a) => sum + a.loads, 0);
     const tonnage = delivered.reduce((sum, a) => sum + (a.tonnage || 0), 0);
     return { trucks, loads, tonnage };
+  };
+
+  // Get target value for a specific unit type
+  const getTargetValue = (job, unit) => {
+    const target = job.targets.find(t => t.unit === unit);
+    return target ? target.value : 0;
+  };
+
+  // Update target value for a job
+  const handleUpdateTarget = (jobId, unit, value) => {
+    const numValue = parseInt(value) || 0;
+    setJobs(jobs.map(job => {
+      if (job.id === jobId) {
+        const existingTargets = job.targets.filter(t => t.unit !== unit);
+        const newTargets = numValue > 0 
+          ? [...existingTargets, { unit, value: numValue }]
+          : existingTargets;
+        return { ...job, targets: newTargets };
+      }
+      return job;
+    }));
   };
 
   // Get available unit types (ones not already added)
@@ -1233,6 +1264,7 @@ export default function DailyPlanningPrototype() {
       targets: newJobForm.targets,
       references: [],
       assignments: [],
+      unassignedLoads: 0,
     };
     
     setJobs([newJob, ...jobs]);
@@ -1250,12 +1282,13 @@ export default function DailyPlanningPrototype() {
     setShowAssignModal(true);
     setDriverSearch('');
     setExpandedFleets(Object.keys(driverPool));
+    setAddUnassignedInput('');
     
-    // Pre-populate with existing assignments for this job
     const job = jobs.find(j => j.id === jobId);
+    setModalUnassignedLoads(job ? (job.unassignedLoads ?? 0) : 0);
+    
     if (job && job.assignments.length > 0) {
       const existingDrivers = job.assignments.map(a => {
-        // Find the driver in the pool by matching last name
         let matchedDriver = null;
         Object.values(driverPool).forEach(fleet => {
           const found = fleet.find(d => d.name.split(' ').pop() === a.driver);
@@ -1267,6 +1300,7 @@ export default function DailyPlanningPrototype() {
           truckId: a.id,
           loads: a.loads,
           recurring: a.recurring,
+          loadsFromUnassigned: 0, // Existing assignments - assume they were created before this feature
         };
       });
       setSelectedDrivers(existingDrivers);
@@ -1280,6 +1314,8 @@ export default function DailyPlanningPrototype() {
     setAssigningJobId(null);
     setDriverSearch('');
     setSelectedDrivers([]);
+    setModalUnassignedLoads(0);
+    setAddUnassignedInput('');
   };
 
   const getDriverDaySchedule = (driver) => {
@@ -1306,25 +1342,61 @@ export default function DailyPlanningPrototype() {
     return schedule;
   };
 
+  const addUnassignedLoads = (n) => {
+    const num = parseInt(n) || 0;
+    if (num > 0) setModalUnassignedLoads(prev => prev + num);
+  };
+
   const toggleDriverSelection = (driver) => {
     const existing = selectedDrivers.find(d => d.driverId === driver.id);
     if (existing) {
+      setModalUnassignedLoads(prev => prev + (existing.loadsFromUnassigned || 0));
       setSelectedDrivers(selectedDrivers.filter(d => d.driverId !== driver.id));
     } else {
+      const pull = Math.min(1, modalUnassignedLoads);
+      setModalUnassignedLoads(prev => Math.max(0, prev - pull));
       setSelectedDrivers([...selectedDrivers, {
         driverId: driver.id,
         name: driver.name,
         truckId: driver.truckId,
         loads: 1,
         recurring: false,
+        loadsFromUnassigned: pull,
       }]);
     }
   };
 
-  const updateDriverLoads = (driverId, loads) => {
-    setSelectedDrivers(selectedDrivers.map(d => 
-      d.driverId === driverId ? { ...d, loads: parseInt(loads) || 1 } : d
-    ));
+  const updateDriverLoads = (driverId, newLoadsVal) => {
+    const newLoads = Math.max(1, parseInt(newLoadsVal) || 1);
+    const driver = selectedDrivers.find(d => d.driverId === driverId);
+    if (!driver) return;
+    const oldLoads = driver.loads;
+    const oldFromUnassigned = driver.loadsFromUnassigned || 0;
+    const delta = newLoads - oldLoads;
+    
+    if (delta > 0) {
+      // Increasing: pull from unassigned first
+      const pull = Math.min(delta, modalUnassignedLoads);
+      setModalUnassignedLoads(prev => Math.max(0, prev - pull));
+      setSelectedDrivers(selectedDrivers.map(d => 
+        d.driverId === driverId ? { 
+          ...d, 
+          loads: newLoads,
+          loadsFromUnassigned: oldFromUnassigned + pull,
+        } : d
+      ));
+    } else if (delta < 0) {
+      // Decreasing: return to unassigned (proportionally)
+      const returnCount = Math.min(-delta, oldFromUnassigned);
+      setModalUnassignedLoads(prev => prev + returnCount);
+      setSelectedDrivers(selectedDrivers.map(d => 
+        d.driverId === driverId ? { 
+          ...d, 
+          loads: newLoads,
+          loadsFromUnassigned: Math.max(0, oldFromUnassigned - returnCount),
+        } : d
+      ));
+    }
   };
 
   const toggleDriverRecurring = (driverId) => {
@@ -1334,11 +1406,36 @@ export default function DailyPlanningPrototype() {
   };
 
   const removeSelectedDriver = (driverId) => {
+    const driver = selectedDrivers.find(d => d.driverId === driverId);
+    if (driver) {
+      // Return only the loads that came from unassigned
+      setModalUnassignedLoads(prev => prev + (driver.loadsFromUnassigned || 0));
+    }
     setSelectedDrivers(selectedDrivers.filter(d => d.driverId !== driverId));
   };
 
+  const deleteDriverLoads = (driverId) => {
+    const driver = selectedDrivers.find(d => d.driverId === driverId);
+    if (driver && confirm(`Delete ${driver.loads} load${driver.loads !== 1 ? 's' : ''} from ${driver.name}? This cannot be undone.`)) {
+      // Don't return to unassigned - just delete
+      setSelectedDrivers(selectedDrivers.filter(d => d.driverId !== driverId));
+    }
+  };
+
   const clearAllDrivers = () => {
+    const totalFromUnassigned = selectedDrivers.reduce((sum, d) => sum + (d.loadsFromUnassigned || 0), 0);
+    setModalUnassignedLoads(prev => prev + totalFromUnassigned);
     setSelectedDrivers([]);
+  };
+
+  const handleNavigateToTimeline = (job) => {
+    // Would navigate to timeline (calendar) view pre-filtered for this job
+    alert(`Navigate to Timeline view filtered for:\n\n"${job.jobName}"\n\n(Job ID: ${job.id})`);
+  };
+
+  const handleNavigateToOrderList = (job) => {
+    // Would navigate to order list view pre-filtered for this job
+    alert(`Navigate to Order list view filtered for:\n\n"${job.jobName}"\n\n(Job ID: ${job.id})`);
   };
 
   const toggleFleetExpanded = (fleet) => {
@@ -1366,23 +1463,22 @@ export default function DailyPlanningPrototype() {
   const handleAssignDrivers = () => {
     setJobs(jobs.map(job => {
       if (job.id === assigningJobId) {
-        // Replace all assignments with current selections
         const newAssignments = selectedDrivers.map(d => ({
           id: d.truckId,
-          driver: d.name.split(' ').pop(), // Last name
+          driver: d.name.split(' ').pop(),
           loads: d.loads,
-          tonnage: d.loads * 22, // Estimate tonnage
+          tonnage: d.loads * 22,
           recurring: d.recurring,
           status: 'pending',
         }));
         return {
           ...job,
+          unassignedLoads: modalUnassignedLoads,
           assignments: newAssignments,
         };
       }
       return job;
     }));
-    
     handleCloseAssignModal();
   };
 
@@ -1431,45 +1527,72 @@ export default function DailyPlanningPrototype() {
               </div>
             )}
           </div>
-          <div style={styles.sortWrapper}>
-            <select 
-              style={styles.sortSelect}
-              value={sortOrder}
-              onChange={(e) => setSortOrder(e.target.value)}
-            >
-              <option value="customer-asc">Customer A→Z</option>
-              <option value="customer-desc">Customer Z→A</option>
-              <option value="trucks-desc">Most Trucks</option>
-              <option value="trucks-asc">Fewest Trucks</option>
-              <option value="tonnage-desc">Highest Tonnage</option>
-              <option value="tonnage-asc">Lowest Tonnage</option>
-              <option value="time-asc">Earliest Start</option>
-              <option value="time-desc">Latest Start</option>
-            </select>
-          </div>
+          {versionMode === 'northStar' && (
+            <div style={styles.sortWrapper}>
+              <select 
+                style={styles.sortSelect}
+                value={sortOrder}
+                onChange={(e) => setSortOrder(e.target.value)}
+              >
+                <option value="customer-asc">Customer A→Z</option>
+                <option value="customer-desc">Customer Z→A</option>
+                <option value="trucks-desc">Most Trucks</option>
+                <option value="trucks-asc">Fewest Trucks</option>
+                <option value="tonnage-desc">Highest Tonnage</option>
+                <option value="tonnage-asc">Lowest Tonnage</option>
+                <option value="time-asc">Earliest Start</option>
+                <option value="time-desc">Latest Start</option>
+              </select>
+            </div>
+          )}
         </div>
         
         {/* Search Bar */}
-        <div style={styles.searchWrapper}>
-          <span style={styles.searchIcon}>🔍</span>
-          <input
-            type="text"
-            style={styles.searchInput}
-            placeholder="Search jobs by customer, location, tag..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-          {searchQuery && (
-            <button 
-              style={styles.searchClearButton}
-              onClick={() => setSearchQuery('')}
-            >
-              ×
-            </button>
-          )}
-        </div>
+        {versionMode === 'northStar' && (
+          <div style={styles.searchWrapper}>
+            <span style={styles.searchIcon}>🔍</span>
+            <input
+              type="text"
+              style={styles.searchInput}
+              placeholder="Search jobs by customer, location, tag..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+            {searchQuery && (
+              <button 
+                style={styles.searchClearButton}
+                onClick={() => setSearchQuery('')}
+              >
+                ×
+              </button>
+            )}
+          </div>
+        )}
 
         <div style={styles.headerRight}>
+          {/* Version Toggle */}
+          <div style={styles.versionToggle}>
+            <button 
+              style={{
+                ...styles.versionToggleButton,
+                ...(versionMode === 'northStar' ? styles.versionToggleButtonActive : {}),
+              }}
+              onClick={() => setVersionMode('northStar')}
+              title="North Star - Full featured version"
+            >
+              ⭐ North Star
+            </button>
+            <button 
+              style={{
+                ...styles.versionToggleButton,
+                ...(versionMode === 'nextHoppers' ? styles.versionToggleButtonActive : {}),
+              }}
+              onClick={() => setVersionMode('nextHoppers')}
+              title="Next Up Hopper Milestone - Production version"
+            >
+              ✓ Next Up Hopper Milestone
+            </button>
+          </div>
           {/* View Toggle */}
           <div style={styles.viewToggle}>
             <button 
@@ -1565,6 +1688,107 @@ export default function DailyPlanningPrototype() {
               <span style={styles.configLabel}>Notes column</span>
             </label>
           </div>
+          <div style={styles.configSection}>
+            <div style={styles.configSectionTitle}>Column Visibility</div>
+            {versionMode === 'nextHoppers' && (
+              <>
+                <label style={styles.configOption}>
+                  <input
+                    type="checkbox"
+                    checked={viewConfig.showTruckTarget}
+                    onChange={(e) => setViewConfig({...viewConfig, showTruckTarget: e.target.checked})}
+                    style={styles.configCheckbox}
+                  />
+                  <span style={styles.configLabel}>truckTarget</span>
+                </label>
+                <label style={styles.configOption}>
+                  <input
+                    type="checkbox"
+                    checked={viewConfig.showLoadTarget}
+                    onChange={(e) => setViewConfig({...viewConfig, showLoadTarget: e.target.checked})}
+                    style={styles.configCheckbox}
+                  />
+                  <span style={styles.configLabel}>loadTarget</span>
+                </label>
+                <label style={styles.configOption}>
+                  <input
+                    type="checkbox"
+                    checked={viewConfig.showCommodityTotals}
+                    onChange={(e) => setViewConfig({...viewConfig, showCommodityTotals: e.target.checked})}
+                    style={styles.configCheckbox}
+                  />
+                  <span style={styles.configLabel}>Commodity Totals</span>
+                </label>
+                <label style={styles.configOption}>
+                  <input
+                    type="checkbox"
+                    checked={viewConfig.showAssignmentCount}
+                    onChange={(e) => setViewConfig({...viewConfig, showAssignmentCount: e.target.checked})}
+                    style={styles.configCheckbox}
+                  />
+                  <span style={styles.configLabel}>Assignment Count</span>
+                </label>
+                <label style={styles.configOption}>
+                  <input
+                    type="checkbox"
+                    checked={viewConfig.showLoadCount}
+                    onChange={(e) => setViewConfig({...viewConfig, showLoadCount: e.target.checked})}
+                    style={styles.configCheckbox}
+                  />
+                  <span style={styles.configLabel}>Load Count</span>
+                </label>
+              </>
+            )}
+            {versionMode === 'northStar' && (
+              <>
+                <label style={styles.configOption}>
+                  <input
+                    type="checkbox"
+                    checked={viewConfig.showTruckTarget}
+                    onChange={(e) => setViewConfig({...viewConfig, showTruckTarget: e.target.checked})}
+                    style={styles.configCheckbox}
+                  />
+                  <span style={styles.configLabel}>truckTarget (in PROGRESS)</span>
+                </label>
+                <label style={styles.configOption}>
+                  <input
+                    type="checkbox"
+                    checked={viewConfig.showLoadTarget}
+                    onChange={(e) => setViewConfig({...viewConfig, showLoadTarget: e.target.checked})}
+                    style={styles.configCheckbox}
+                  />
+                  <span style={styles.configLabel}>loadTarget (in PROGRESS)</span>
+                </label>
+                <label style={styles.configOption}>
+                  <input
+                    type="checkbox"
+                    checked={viewConfig.showCommodityTotals}
+                    onChange={(e) => setViewConfig({...viewConfig, showCommodityTotals: e.target.checked})}
+                    style={styles.configCheckbox}
+                  />
+                  <span style={styles.configLabel}>Commodity Totals</span>
+                </label>
+                <label style={styles.configOption}>
+                  <input
+                    type="checkbox"
+                    checked={viewConfig.showAssignmentCount}
+                    onChange={(e) => setViewConfig({...viewConfig, showAssignmentCount: e.target.checked})}
+                    style={styles.configCheckbox}
+                  />
+                  <span style={styles.configLabel}>Assignment Count</span>
+                </label>
+                <label style={styles.configOption}>
+                  <input
+                    type="checkbox"
+                    checked={viewConfig.showLoadCount}
+                    onChange={(e) => setViewConfig({...viewConfig, showLoadCount: e.target.checked})}
+                    style={styles.configCheckbox}
+                  />
+                  <span style={styles.configLabel}>Load Count</span>
+                </label>
+              </>
+            )}
+          </div>
         </div>
       )}
 
@@ -1607,8 +1831,22 @@ export default function DailyPlanningPrototype() {
               <th style={styles.thCheckbox}></th>
               <th style={styles.thWorkToDo}>WORK TO DO</th>
               {viewConfig.showNotes && <th style={styles.thNotes}>NOTES</th>}
-              <th style={styles.thProgress}>PROGRESS</th>
+              {versionMode === 'northStar' ? (
+                <th style={styles.thProgress}>PROGRESS</th>
+              ) : (
+                <>
+                  {viewConfig.showTruckTarget && <th style={styles.thTarget}>truckTarget</th>}
+                  {viewConfig.showLoadTarget && <th style={styles.thTarget}>loadTarget</th>}
+                </>
+              )}
               <th style={styles.thAssignments}>ASSIGNMENTS</th>
+              {versionMode === 'nextHoppers' && (
+                <>
+                  {viewConfig.showCommodityTotals && <th style={styles.thColumn}>Commodity Totals</th>}
+                  {viewConfig.showAssignmentCount && <th style={styles.thColumn}>Assignment Count</th>}
+                  {viewConfig.showLoadCount && <th style={styles.thColumn}>Load Count</th>}
+                </>
+              )}
               <th style={styles.thActions}></th>
             </tr>
           </thead>
@@ -1726,46 +1964,79 @@ export default function DailyPlanningPrototype() {
                       />
                     </td>
                   )}
-                  <td style={styles.tdProgress}>
-                    <div style={styles.targetPills}>
-                      {job.targets.length > 0 ? (
-                        // Show pill for each target
-                        job.targets.map((target, idx) => {
-                          const actual = target.unit === 'tonnage' ? actuals.tonnage :
-                                        target.unit === 'trucks' ? actuals.trucks :
-                                        target.unit === 'loads' ? actuals.loads : 0;
-                          const percent = Math.min(100, Math.round((actual / target.value) * 100));
-                          const isMet = actual >= target.value;
-                          const isClose = percent >= 75;
-                          const bgColor = isMet ? '#C6F6D5' : isClose ? '#FEFCBF' : '#FED7D7';
-                          const textColor = isMet ? '#276749' : isClose ? '#975A16' : '#C53030';
-                          const unitLabel = target.unit === 'tonnage' ? 'tons' : target.unit;
-                          
-                          return (
-                            <span 
-                              key={idx} 
-                              style={{
-                                ...styles.targetPill,
-                                backgroundColor: bgColor,
-                                color: textColor,
-                              }}
-                            >
-                              {actual}/{target.value} {unitLabel}
-                              {isMet && ' ✓'}
+                  {versionMode === 'northStar' ? (
+                    <td style={styles.tdProgress}>
+                      <div style={styles.targetPills}>
+                        {job.targets.length > 0 ? (
+                          // Show pill for each target
+                          job.targets.map((target, idx) => {
+                            const actual = target.unit === 'tonnage' ? actuals.tonnage :
+                                          target.unit === 'trucks' ? actuals.trucks :
+                                          target.unit === 'loads' ? actuals.loads : 0;
+                            const percent = Math.min(100, Math.round((actual / target.value) * 100));
+                            const isMet = actual >= target.value;
+                            const isClose = percent >= 75;
+                            const bgColor = isMet ? '#C6F6D5' : isClose ? '#FEFCBF' : '#FED7D7';
+                            const textColor = isMet ? '#276749' : isClose ? '#975A16' : '#C53030';
+                            const unitLabel = target.unit === 'tonnage' ? 'tons' : target.unit;
+                            
+                            return (
+                              <span 
+                                key={idx} 
+                                style={{
+                                  ...styles.targetPill,
+                                  backgroundColor: bgColor,
+                                  color: textColor,
+                                }}
+                              >
+                                {actual}/{target.value} {unitLabel}
+                                {isMet && ' ✓'}
+                              </span>
+                            );
+                          })
+                        ) : (
+                          // No targets - show truck count and encourage setting targets
+                          <div style={styles.noTargetState}>
+                            <span style={styles.noTargetTrucks}>
+                              {job.assignments.length} truck{job.assignments.length !== 1 ? 's' : ''} assigned
                             </span>
-                          );
-                        })
-                      ) : (
-                        // No targets - show truck count and encourage setting targets
-                        <div style={styles.noTargetState}>
-                          <span style={styles.noTargetTrucks}>
-                            {job.assignments.length} truck{job.assignments.length !== 1 ? 's' : ''} assigned
-                          </span>
-                          <span style={styles.noTargetHint}>Set a target to track progress</span>
-                        </div>
+                            <span style={styles.noTargetHint}>Set a target to track progress</span>
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                  ) : (
+                    <>
+                      {/* Truck Target */}
+                      {viewConfig.showTruckTarget && (
+                        <td style={styles.tdTarget} onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="number"
+                            className="targetInput"
+                            style={styles.targetInput}
+                            value={getTargetValue(job, 'trucks') || ''}
+                            onChange={(e) => handleUpdateTarget(job.id, 'trucks', e.target.value)}
+                            placeholder="—"
+                            min="0"
+                          />
+                        </td>
                       )}
-                    </div>
-                  </td>
+                      {/* Load Target */}
+                      {viewConfig.showLoadTarget && (
+                        <td style={styles.tdTarget} onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="number"
+                            className="targetInput"
+                            style={styles.targetInput}
+                            value={getTargetValue(job, 'loads') || ''}
+                            onChange={(e) => handleUpdateTarget(job.id, 'loads', e.target.value)}
+                            placeholder="—"
+                            min="0"
+                          />
+                        </td>
+                      )}
+                    </>
+                  )}
                   <td 
                     style={styles.tdAssignments}
                     onClick={(e) => {
@@ -1774,6 +2045,20 @@ export default function DailyPlanningPrototype() {
                     }}
                   >
                     <div style={styles.assignmentsList}>
+                      {(job.unassignedLoads ?? 0) > 0 && (
+                        <span 
+                          style={{
+                            ...styles.assignmentBadge,
+                            ...styles.unassignedLoadsBadge,
+                          }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenAssignModal(job.id, e);
+                          }}
+                        >
+                          Unassigned: {(job.unassignedLoads ?? 0)}
+                        </span>
+                      )}
                       {job.assignments.map((assignment, idx) => {
                         const statusStyle = statusColors[assignment.status] || statusColors.pending;
                         return (
@@ -1802,19 +2087,115 @@ export default function DailyPlanningPrototype() {
                       >
                         +
                       </button>
+                      <div style={styles.assignmentQuickLinks}>
+                        <button
+                          type="button"
+                          className="assignmentQuickLink"
+                          style={styles.assignmentQuickLink}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleNavigateToTimeline(job);
+                          }}
+                          title={`Timeline view filtered for ${job.jobName}`}
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{marginRight: '4px'}}>
+                            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                            <line x1="16" y1="2" x2="16" y2="6"></line>
+                            <line x1="8" y1="2" x2="8" y2="6"></line>
+                            <line x1="3" y1="10" x2="21" y2="10"></line>
+                          </svg>
+                          Timeline
+                        </button>
+                        <button
+                          type="button"
+                          className="assignmentQuickLink"
+                          style={styles.assignmentQuickLink}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleNavigateToOrderList(job);
+                          }}
+                          title={`Order list filtered for ${job.jobName}`}
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{marginRight: '4px'}}>
+                            <line x1="8" y1="6" x2="21" y2="6"></line>
+                            <line x1="8" y1="12" x2="21" y2="12"></line>
+                            <line x1="8" y1="18" x2="21" y2="18"></line>
+                            <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                            <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                            <line x1="3" y1="18" x2="3.01" y2="18"></line>
+                          </svg>
+                          Orders
+                        </button>
+                      </div>
                     </div>
                   </td>
+                  {versionMode === 'nextHoppers' && (
+                    <>
+                      {/* Commodity Totals */}
+                      {viewConfig.showCommodityTotals && (
+                        <td style={styles.tdColumn}>
+                          {actuals.tonnage > 0 ? `${actuals.tonnage} tons` : '—'}
+                        </td>
+                      )}
+                      {/* Assignment Count */}
+                      {viewConfig.showAssignmentCount && (
+                        <td style={styles.tdColumn}>
+                          {(() => {
+                            const truckTarget = getTargetValue(job, 'trucks');
+                            const actualTrucks = actuals.trucks;
+                            const isMet = truckTarget > 0 && actualTrucks >= truckTarget;
+                            const bgColor = isMet ? '#C6F6D5' : truckTarget > 0 ? '#FED7D7' : '#F7FAFC';
+                            const textColor = isMet ? '#276749' : truckTarget > 0 ? '#C53030' : '#718096';
+                            return (
+                              <div style={{
+                                ...styles.actualValue,
+                                backgroundColor: bgColor,
+                                color: textColor,
+                              }}>
+                                {actualTrucks}
+                                {isMet && ' ✓'}
+                              </div>
+                            );
+                          })()}
+                        </td>
+                      )}
+                      {/* Load Count */}
+                      {viewConfig.showLoadCount && (
+                        <td style={styles.tdColumn}>
+                          {(() => {
+                            const loadTarget = getTargetValue(job, 'loads');
+                            const actualLoads = actuals.loads;
+                            const isMet = loadTarget > 0 && actualLoads >= loadTarget;
+                            const bgColor = isMet ? '#C6F6D5' : loadTarget > 0 ? '#FED7D7' : '#F7FAFC';
+                            const textColor = isMet ? '#276749' : loadTarget > 0 ? '#C53030' : '#718096';
+                            return (
+                              <div style={{
+                                ...styles.actualValue,
+                                backgroundColor: bgColor,
+                                color: textColor,
+                              }}>
+                                {actualLoads}
+                                {isMet && ' ✓'}
+                              </div>
+                            );
+                          })()}
+                        </td>
+                      )}
+                    </>
+                  )}
                   <td style={styles.tdActions}>
                     <div className="actionButtons" style={styles.actionButtons}>
-                      <button
-                        className="actionButton"
-                        style={{...styles.actionButton, ...styles.actionButtonDispatch}}
-                        onClick={(e) => handleOpenDispatchModal(job, e)}
-                        title="Dispatch job"
-                        disabled={job.assignments.length === 0}
-                      >
-                        🚀
-                      </button>
+                      {versionMode === 'northStar' && (
+                        <button
+                          className="actionButton"
+                          style={{...styles.actionButton, ...styles.actionButtonDispatch}}
+                          onClick={(e) => handleOpenDispatchModal(job, e)}
+                          title="Dispatch job"
+                          disabled={job.assignments.length === 0}
+                        >
+                          🚀
+                        </button>
+                      )}
                       <button
                         className="actionButton"
                         style={{...styles.actionButton, ...styles.actionButtonCopy}}
@@ -1823,15 +2204,17 @@ export default function DailyPlanningPrototype() {
                       >
                         📋
                       </button>
-                      <button
-                        className="actionButton"
-                        style={{...styles.actionButton, ...styles.actionButtonMessage}}
-                        onClick={(e) => handleOpenMessageModal(job, e)}
-                        title="Message drivers"
-                        disabled={job.assignments.length === 0}
-                      >
-                        💬
-                      </button>
+                      {versionMode === 'northStar' && (
+                        <button
+                          className="actionButton"
+                          style={{...styles.actionButton, ...styles.actionButtonMessage}}
+                          onClick={(e) => handleOpenMessageModal(job, e)}
+                          title="Message drivers"
+                          disabled={job.assignments.length === 0}
+                        >
+                          💬
+                        </button>
+                      )}
                       <button
                         className="actionButton actionButtonDanger"
                         style={{...styles.actionButton, ...styles.actionButtonDanger}}
@@ -1871,10 +2254,14 @@ export default function DailyPlanningPrototype() {
                 <label style={styles.label}>Job Name</label>
                 <input 
                   type="text"
-                  style={styles.input}
+                  style={{
+                    ...styles.input,
+                    ...(versionMode === 'nextHoppers' ? { opacity: 0.6, cursor: 'not-allowed' } : {})
+                  }}
                   value={editForm.jobName || ''}
                   onChange={(e) => setEditForm({...editForm, jobName: e.target.value})}
                   placeholder="Enter job name..."
+                  disabled={versionMode === 'nextHoppers'}
                 />
               </div>
 
@@ -1939,8 +2326,9 @@ export default function DailyPlanningPrototype() {
                 </select>
               </div>
 
-              <div style={styles.divider} />
+              {versionMode === 'northStar' && <div style={styles.divider} />}
 
+              {versionMode === 'northStar' && (
               <div style={styles.panelSection}>
                 <div style={styles.sectionHeader}>
                   <span style={styles.panelSectionTitle}>Targets</span>
@@ -2017,10 +2405,12 @@ export default function DailyPlanningPrototype() {
                   </div>
                 )}
               </div>
+              )}
 
-              <div style={styles.divider} />
+              {versionMode === 'northStar' && <div style={styles.divider} />}
 
               {/* Start Time Section */}
+              {versionMode === 'northStar' && (
               <div style={styles.panelSection}>
                 <div style={styles.sectionHeader}>
                   <span style={styles.panelSectionTitle}>Start Time</span>
@@ -2043,10 +2433,12 @@ export default function DailyPlanningPrototype() {
                   )}
                 </div>
               </div>
+              )}
 
-              <div style={styles.divider} />
+              {versionMode === 'northStar' && <div style={styles.divider} />}
 
               {/* Reference Numbers Section */}
+              {versionMode === 'northStar' && (
               <div style={styles.panelSection}>
                 <div style={styles.sectionHeader}>
                   <span style={styles.panelSectionTitle}>Reference Numbers</span>
@@ -2119,10 +2511,12 @@ export default function DailyPlanningPrototype() {
                   </div>
                 )}
               </div>
+              )}
 
-              <div style={styles.divider} />
+              {versionMode === 'northStar' && <div style={styles.divider} />}
 
               {/* Charges Section */}
+              {versionMode === 'northStar' && (
               <div style={styles.panelSection}>
                 <div style={styles.sectionHeader}>
                   <span style={styles.panelSectionTitle}>Charges</span>
@@ -2230,6 +2624,7 @@ export default function DailyPlanningPrototype() {
                   + Add Charge
                 </button>
               </div>
+              )}
             </div>
 
             <div style={styles.panelFooter}>
@@ -2392,6 +2787,7 @@ export default function DailyPlanningPrototype() {
                         </select>
                       </div>
 
+                      {versionMode === 'northStar' && (
                       <div style={styles.formSection}>
                         <label style={styles.formLabel}>Targets (optional)</label>
                         {newJobForm.targets.length > 0 && (
@@ -2445,6 +2841,7 @@ export default function DailyPlanningPrototype() {
                           </div>
                         )}
                       </div>
+                      )}
                     </>
                   )}
                 </>
@@ -2515,6 +2912,7 @@ export default function DailyPlanningPrototype() {
                     </select>
                   </div>
 
+                  {versionMode === 'northStar' && (
                   <div style={styles.formSection}>
                     <label style={styles.formLabel}>Targets (optional)</label>
                     {newJobForm.targets.length > 0 && (
@@ -2568,6 +2966,7 @@ export default function DailyPlanningPrototype() {
                       </div>
                     )}
                   </div>
+                  )}
                 </>
               )}
             </div>
@@ -2634,6 +3033,7 @@ export default function DailyPlanningPrototype() {
                             const isSelected = selectedDrivers.some(d => d.driverId === driver.id);
                             const schedule = getDriverDaySchedule(driver);
                             const hasNote = !!driver.note;
+                            const totalLoads = schedule.reduce((sum, item) => sum + item.loads, 0);
                             return (
                               <label 
                                 key={driver.id} 
@@ -2648,37 +3048,51 @@ export default function DailyPlanningPrototype() {
                                 <div style={styles.driverInfo}>
                                   <div style={styles.driverNameRow}>
                                     <span style={styles.driverName}>{driver.name}</span>
-                                    {hasNote && (
+                                    {versionMode === 'northStar' && hasNote && (
                                       <span style={styles.driverNoteBadge}>
                                         📝 {driver.note}
                                       </span>
                                     )}
                                   </div>
-                                  {schedule.length === 0 ? (
-                                    <span style={styles.driverUnassigned}>
-                                      <span style={styles.truckIcon}>🚛</span>
-                                      Unassigned
-                                    </span>
+                                  {versionMode === 'northStar' ? (
+                                    schedule.length === 0 ? (
+                                      <span style={styles.driverUnassigned}>
+                                        <span style={styles.truckIcon}>🚛</span>
+                                        Unassigned
+                                      </span>
+                                    ) : (
+                                      <div style={styles.driverSchedule}>
+                                        {schedule.map((item, idx) => (
+                                          <div key={idx} style={styles.scheduleItem}>
+                                            <span style={{
+                                              ...styles.scheduleIndex,
+                                              backgroundColor: statusColors[item.status]?.bg || '#E2E8F0',
+                                              color: statusColors[item.status]?.color || '#4A5568',
+                                            }}>
+                                              {idx + 1}
+                                            </span>
+                                            <span style={styles.scheduleJobName}>{item.jobName}</span>
+                                            <span style={{
+                                              ...styles.scheduleCommodityDot,
+                                              backgroundColor: item.commodityColor,
+                                            }} />
+                                            <span style={styles.scheduleLoads}>{item.loads}L</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )
                                   ) : (
-                                    <div style={styles.driverSchedule}>
-                                      {schedule.map((item, idx) => (
-                                        <div key={idx} style={styles.scheduleItem}>
-                                          <span style={{
-                                            ...styles.scheduleIndex,
-                                            backgroundColor: statusColors[item.status]?.bg || '#E2E8F0',
-                                            color: statusColors[item.status]?.color || '#4A5568',
-                                          }}>
-                                            {idx + 1}
-                                          </span>
-                                          <span style={styles.scheduleJobName}>{item.jobName}</span>
-                                          <span style={{
-                                            ...styles.scheduleCommodityDot,
-                                            backgroundColor: item.commodityColor,
-                                          }} />
-                                          <span style={styles.scheduleLoads}>{item.loads}L</span>
-                                        </div>
-                                      ))}
-                                    </div>
+                                    // Next Up Hopper Milestone mode: show total load count
+                                    schedule.length === 0 ? (
+                                      <span style={styles.driverUnassigned}>
+                                        <span style={styles.truckIcon}>🚛</span>
+                                        Unassigned
+                                      </span>
+                                    ) : (
+                                      <span style={styles.driverTotalLoads}>
+                                        {totalLoads} load{totalLoads !== 1 ? 's' : ''}
+                                      </span>
+                                    )
                                   )}
                                 </div>
                               </label>
@@ -2693,13 +3107,67 @@ export default function DailyPlanningPrototype() {
 
               {/* Right panel - Selected drivers */}
               <div style={styles.selectedDriversPanel}>
+                {/* Unassigned loads - always at top */}
+                <div style={styles.unassignedLoadsCard}>
+                  <div style={styles.unassignedLoadsCardHeader}>
+                    <span style={styles.unassignedLoadsCardLabel}>Unassigned Loads</span>
+                    <span style={styles.unassignedLoadsCardValue}>{modalUnassignedLoads}</span>
+                    {modalUnassignedLoads > 0 && (
+                      <button
+                        style={styles.unassignedLoadsDeleteButton}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (confirm(`Delete all ${modalUnassignedLoads} unassigned load${modalUnassignedLoads !== 1 ? 's' : ''}?`)) {
+                            setModalUnassignedLoads(0);
+                          }
+                        }}
+                        title="Delete unassigned loads"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                  <div style={styles.unassignedLoadsCardControls}>
+                    <input
+                      type="number"
+                      min="1"
+                      placeholder="Add"
+                      style={styles.unassignedLoadsCardInput}
+                      value={addUnassignedInput}
+                      onChange={(e) => setAddUnassignedInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          addUnassignedLoads(addUnassignedInput);
+                          setAddUnassignedInput('');
+                        }
+                      }}
+                    />
+                    <button
+                      style={{
+                        ...styles.unassignedLoadsCardButton,
+                        ...(!addUnassignedInput || parseInt(addUnassignedInput, 10) < 1 ? styles.unassignedLoadsCardButtonDisabled : {}),
+                      }}
+                      onClick={() => {
+                        addUnassignedLoads(addUnassignedInput);
+                        setAddUnassignedInput('');
+                      }}
+                      disabled={!addUnassignedInput || parseInt(addUnassignedInput, 10) < 1}
+                    >
+                      Add
+                    </button>
+                  </div>
+                  {modalUnassignedLoads > 0 && (
+                    <div style={styles.unassignedLoadsCardHint}>
+                      Assign drivers below to allocate these loads. Decreasing driver loads returns them here (only loads that came from unassigned).
+                    </div>
+                  )}
+                </div>
+
                 {selectedDrivers.length === 0 ? (
                   <div style={styles.noDriversSelected}>
                     <span style={styles.noDriversTitle}>No Drivers Selected</span>
                     <span style={styles.noDriversSubtitle}>
-                      {jobs.find(j => j.id === assigningJobId)?.assignments.length > 0 
-                        ? 'Click Done to clear all assignments, or select drivers on the left'
-                        : 'Find and select drivers for this assignment'}
+                      Select drivers from the left to assign loads. Use × to remove (returns loads from unassigned), or 🗑 to delete (permanently removes).
                     </span>
                   </div>
                 ) : (
@@ -2719,6 +3187,7 @@ export default function DailyPlanningPrototype() {
                             <button 
                               style={styles.removeDriverButton}
                               onClick={() => removeSelectedDriver(driver.driverId)}
+                              title="Remove driver - returns loads that came from unassigned pool back to unassigned"
                             >
                               ×
                             </button>
@@ -2740,6 +3209,16 @@ export default function DailyPlanningPrototype() {
                               title="Make flexible load group - drivers can add/remove loads"
                             >
                               ↻
+                            </button>
+                            <button
+                              style={styles.deleteLoadsButton}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteDriverLoads(driver.driverId);
+                              }}
+                              title="Delete loads (permanently remove, does not return to unassigned)"
+                            >
+                              🗑
                             </button>
                           </div>
                         </div>
@@ -2867,8 +3346,8 @@ export default function DailyPlanningPrototype() {
                 )}
               </div>
 
-              {/* Targets section - only for single job copy */}
-              {copyingJob && (
+              {/* Targets section - only for single job copy; hidden in stripped-down */}
+              {versionMode === 'northStar' && copyingJob && (
                 <div style={styles.copySection}>
                   <div style={styles.copySectionHeader}>
                     <label style={styles.copySectionLabel}>Targets for copied job</label>
@@ -3417,6 +3896,31 @@ const styles = {
     gap: '12px',
     alignItems: 'center',
   },
+  versionToggle: {
+    display: 'flex',
+    backgroundColor: '#F7FAFC',
+    border: '1px solid #E2E8F0',
+    borderRadius: '8px',
+    padding: '2px',
+    marginRight: '12px',
+  },
+  versionToggleButton: {
+    padding: '6px 14px',
+    border: 'none',
+    borderRadius: '6px',
+    backgroundColor: 'transparent',
+    color: '#718096',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontWeight: '500',
+    transition: 'all 0.15s ease',
+    whiteSpace: 'nowrap',
+  },
+  versionToggleButtonActive: {
+    backgroundColor: '#3182CE',
+    color: '#FFF',
+    boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
+  },
   viewToggle: {
     display: 'flex',
     backgroundColor: '#EDF2F7',
@@ -3490,6 +3994,21 @@ const styles = {
   configOptions: {
     display: 'flex',
     gap: '20px',
+  },
+  configSection: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+    paddingTop: '16px',
+    borderTop: '1px solid #E2E8F0',
+  },
+  configSectionTitle: {
+    fontSize: '12px',
+    fontWeight: '600',
+    color: '#718096',
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+    marginBottom: '4px',
   },
   configOption: {
     display: 'flex',
@@ -3787,6 +4306,71 @@ const styles = {
     padding: '10px 12px',
     verticalAlign: 'top',
   },
+  thTarget: {
+    padding: '12px 16px',
+    textAlign: 'left',
+    fontWeight: '500',
+    fontSize: '11px',
+    color: '#718096',
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+    width: '120px',
+  },
+  thActual: {
+    padding: '12px 16px',
+    textAlign: 'left',
+    fontWeight: '500',
+    fontSize: '11px',
+    color: '#718096',
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+    width: '120px',
+  },
+  tdTarget: {
+    padding: '10px 12px',
+    verticalAlign: 'middle',
+  },
+  tdActual: {
+    padding: '10px 12px',
+    verticalAlign: 'middle',
+  },
+  thColumn: {
+    padding: '12px 16px',
+    textAlign: 'left',
+    fontWeight: '500',
+    fontSize: '11px',
+    color: '#718096',
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+    width: '140px',
+  },
+  tdColumn: {
+    padding: '10px 12px',
+    verticalAlign: 'middle',
+    textAlign: 'center',
+  },
+  targetInput: {
+    width: '100%',
+    padding: '6px 10px',
+    border: '1px solid #E2E8F0',
+    borderRadius: '6px',
+    fontSize: '14px',
+    fontWeight: '500',
+    color: '#1A202C',
+    backgroundColor: '#FFF',
+    textAlign: 'center',
+    outline: 'none',
+    transition: 'all 0.15s ease',
+  },
+  actualValue: {
+    padding: '6px 12px',
+    borderRadius: '6px',
+    fontSize: '14px',
+    fontWeight: '600',
+    textAlign: 'center',
+    minWidth: '60px',
+    display: 'inline-block',
+  },
   targetPills: {
     display: 'flex',
     flexWrap: 'wrap',
@@ -3843,6 +4427,11 @@ const styles = {
     flexGrow: 0,
     width: 'fit-content',
   },
+  unassignedLoadsBadge: {
+    backgroundColor: '#EDF2F7',
+    color: '#4A5568',
+    border: '1px solid #CBD5E0',
+  },
   recurringIcon: {
     marginLeft: '2px',
     color: '#4299E1',
@@ -3854,6 +4443,28 @@ const styles = {
     padding: '1px 4px',
     backgroundColor: 'rgba(0,0,0,0.1)',
     borderRadius: '3px',
+  },
+  assignmentQuickLinks: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '6px',
+    alignItems: 'center',
+    marginTop: '6px',
+    flexBasis: '100%',
+  },
+  assignmentQuickLink: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '3px 8px',
+    border: '1px solid #E2E8F0',
+    borderRadius: '4px',
+    backgroundColor: '#F7FAFC',
+    color: '#4A5568',
+    fontSize: '11px',
+    fontWeight: '500',
+    cursor: 'pointer',
+    textDecoration: 'none',
+    transition: 'all 0.15s ease',
   },
   addAssignmentButton: {
     width: '24px',
@@ -4684,6 +5295,85 @@ const styles = {
     padding: '20px 24px',
     borderBottom: '1px solid #E2E8F0',
   },
+  unassignedLoadsSection: {
+    padding: '16px 24px',
+    borderBottom: '1px solid #E2E8F0',
+    backgroundColor: '#F7FAFC',
+  },
+  unassignedLoadsSummary: {
+    display: 'flex',
+    gap: '24px',
+    marginBottom: '12px',
+  },
+  unassignedLoadsRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  unassignedLoadsLabel: {
+    fontSize: '13px',
+    fontWeight: '500',
+    color: '#718096',
+  },
+  unassignedLoadsValue: {
+    fontSize: '15px',
+    fontWeight: '600',
+    color: '#4A5568',
+  },
+  unassignedQuickAdjust: {
+    display: 'flex',
+    gap: '4px',
+    marginLeft: '8px',
+  },
+  unassignedQuickBtn: {
+    width: '28px',
+    height: '28px',
+    padding: 0,
+    border: '1px solid #E2E8F0',
+    borderRadius: '6px',
+    backgroundColor: '#FFF',
+    fontSize: '16px',
+    fontWeight: '600',
+    color: '#4A5568',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  unassignedLoadsValueTotal: {
+    fontSize: '15px',
+    fontWeight: '700',
+    color: '#3182CE',
+  },
+  addUnassignedRow: {
+    display: 'flex',
+    gap: '10px',
+    alignItems: 'center',
+  },
+  addUnassignedInput: {
+    width: '80px',
+    padding: '8px 12px',
+    border: '1px solid #E2E8F0',
+    borderRadius: '8px',
+    fontSize: '14px',
+    fontWeight: '500',
+  },
+  addUnassignedButton: {
+    padding: '8px 16px',
+    border: 'none',
+    borderRadius: '8px',
+    backgroundColor: '#3182CE',
+    color: '#FFF',
+    fontSize: '13px',
+    fontWeight: '600',
+    cursor: 'pointer',
+  },
+  unassignedLoadsHint: {
+    fontSize: '12px',
+    color: '#718096',
+    marginTop: '10px',
+    fontStyle: 'italic',
+  },
   assignModalBody: {
     display: 'flex',
     flex: 1,
@@ -4822,6 +5512,12 @@ const styles = {
     color: '#A0AEC0',
     fontStyle: 'italic',
   },
+  driverTotalLoads: {
+    fontSize: '13px',
+    fontWeight: '500',
+    color: '#4A5568',
+    marginTop: '4px',
+  },
   driverSchedule: {
     display: 'flex',
     flexDirection: 'column',
@@ -4873,6 +5569,78 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     padding: '16px',
+  },
+  unassignedLoadsCard: {
+    padding: '12px',
+    backgroundColor: '#F7FAFC',
+    border: '1px solid #E2E8F0',
+    borderRadius: '8px',
+    marginBottom: '16px',
+  },
+  unassignedLoadsCardHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: '10px',
+  },
+  unassignedLoadsCardLabel: {
+    fontSize: '13px',
+    fontWeight: '600',
+    color: '#4A5568',
+  },
+  unassignedLoadsCardValue: {
+    fontSize: '18px',
+    fontWeight: '700',
+    color: '#3182CE',
+  },
+  unassignedLoadsCardControls: {
+    display: 'flex',
+    gap: '8px',
+    alignItems: 'center',
+  },
+  unassignedLoadsCardInput: {
+    flex: 1,
+    padding: '6px 10px',
+    border: '1px solid #E2E8F0',
+    borderRadius: '6px',
+    fontSize: '13px',
+    fontWeight: '500',
+  },
+  unassignedLoadsCardButton: {
+    padding: '6px 14px',
+    border: 'none',
+    borderRadius: '6px',
+    backgroundColor: '#3182CE',
+    color: '#FFF',
+    fontSize: '13px',
+    fontWeight: '600',
+    cursor: 'pointer',
+  },
+  unassignedLoadsCardButtonDisabled: {
+    backgroundColor: '#CBD5E0',
+    cursor: 'not-allowed',
+  },
+  unassignedLoadsDeleteButton: {
+    width: '24px',
+    height: '24px',
+    padding: 0,
+    border: '1px solid #FED7D7',
+    borderRadius: '4px',
+    backgroundColor: '#FFF5F5',
+    color: '#C53030',
+    fontSize: '16px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: '8px',
+  },
+  unassignedLoadsCardHint: {
+    fontSize: '11px',
+    color: '#718096',
+    marginTop: '8px',
+    fontStyle: 'italic',
   },
   noDriversSelected: {
     flex: 1,
@@ -4965,6 +5733,20 @@ const styles = {
     fontSize: '14px',
     textAlign: 'center',
     backgroundColor: '#FFF',
+  },
+  deleteLoadsButton: {
+    width: '28px',
+    height: '28px',
+    padding: 0,
+    border: '1px solid #FED7D7',
+    borderRadius: '6px',
+    backgroundColor: '#FFF5F5',
+    color: '#C53030',
+    fontSize: '14px',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   recurringToggle: {
     width: '36px',
@@ -5796,6 +6578,12 @@ styleSheet.textContent = `
     background-color: #EBF8FF;
   }
   
+  .assignmentQuickLink:hover {
+    color: #2C5282;
+    background-color: #EBF8FF;
+    border-color: #BEE3F8;
+  }
+  
   .driverRow:hover {
     background-color: #F7FAFC;
   }
@@ -5808,6 +6596,11 @@ styleSheet.textContent = `
   .notesInput:focus {
     border-color: #3182CE;
     background-color: #FFF;
+    box-shadow: 0 0 0 3px rgba(49, 130, 206, 0.1);
+  }
+  
+  .targetInput:focus {
+    border-color: #3182CE;
     box-shadow: 0 0 0 3px rgba(49, 130, 206, 0.1);
   }
   
